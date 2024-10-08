@@ -4,11 +4,9 @@ namespace App\Http\Controllers;
 
 use App\Http\Requests\PaymentRequest; // Create a request for validation
 use App\Http\Resources\PaymentResource;
-use App\Models\Borrower;
 use App\Models\Loan;
 use App\Models\Payment; // Import the Payment model
 use Illuminate\Http\JsonResponse;
-use Illuminate\Http\Request;
 
 class PaymentController extends Controller
 {
@@ -35,55 +33,47 @@ class PaymentController extends Controller
      */
     public function store(PaymentRequest $request, $id): JsonResponse
     {
-        $paymentExceedsLoan = false;
-        $cancelPayment = false;
+        $responseMessage = null;
+        $finalPaymentAmount = null;
+        // find the loan
         $loan = Loan::findOrFail($id);
-        $borrower = Borrower::findOrFail($loan->borrower_id);
-        $paymentData = [
-            'loan_id' => $loan->id,
-            'payment_amount' => $request->payment_amount,
-        ];
-
-        $amountLeft = $loan->amount_left - $request->payment_amount;
-
-        if($amountLeft < 0) {
-            $paymentExceedsLoan = true;
-            $loan->amount_left = $request->payment_amount - $amountLeft;
+        // check the if the loan is met in full
+        if($loan->amount_left === "0.00") {
+            return response()->json([
+                'message' => 'The loan is paid in full. No need for additional payment.',
+            ], 200);
         }
-        $loan->amount_left = $amountLeft;
-        if($loan->amount_left < 0) {
+
+        // does the payment exceed the needed amount
+        $amountLeftAfterPayment = $loan->amount_left - $request->payment_amount;
+
+        if($amountLeftAfterPayment < 0) { // the payment is more than enough
+            $amountLeftAfterPayment *= -1;
+            $finalPaymentAmount = $request->payment_amount - $amountLeftAfterPayment; // the final amount is the amountLeft substracted from the payment request amount
             $loan->amount_left = 0;
+            $responseMessage = "Loan met in full. Please return to the customer this amount {$amountLeftAfterPayment}.";
+        } else {
+            $responseMessage = 'Payment is processed successfully!';
+            $loan->amount_left = $amountLeftAfterPayment;
+            $finalPaymentAmount = $request->payment_amount;
         }
+
         $loan->save();
 
-        $borrower->total_loans_amount -= $request->payment_amount;
-        if($borrower->total_loans_amount < 0) {
-            $borrower->total_loans_amount = 0;
-        }
-        $borrower->save();
+        // substract from the total loans amount from the borrower
+        $loan->borrower->total_loans_amount -= $request->payment_amount;
+        $loan->borrower->total_loans_amount = $loan->borrower->total_loans_amount < 0 ? 0 : $loan->borrower->total_loans_amount;
+        $loan->borrower->save();
 
-        $responseMessage = 'Payment processed successfully!';
-        if($paymentExceedsLoan) {
-            $exceedAmount = abs($amountLeft);
-            $responseMessage = "Loan met in full. Change from the payed amount is {$exceedAmount}";
-        } else if($loan->amount_left === 0) {
-            $responseMessage = 'The loan is met in full already.';
-            $cancelPayment = true;
-        }
 
-        if(!$cancelPayment) {
-            $payment = Payment::create($paymentData);
-            // Return a success response
-            return response()->json([
-                'message' =>  $responseMessage,
-                'payment' => new PaymentResource($payment),
-            ], 201); // 201 Created status 
-        }
-
+        $payment = Payment::create([
+            'loan_id' => $loan->id,
+            'payment_amount' => $finalPaymentAmount,
+        ]);
         // Return a success response
         return response()->json([
             'message' =>  $responseMessage,
-        ], 201); // 201 Created status
-
+            'payment' => new PaymentResource($payment),
+        ], 201); // 201 Created status 
     }
 }
